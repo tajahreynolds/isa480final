@@ -1,0 +1,239 @@
+
+R version 3.6.0 (2019-04-26) -- "Planting of a Tree"
+Copyright (C) 2019 The R Foundation for Statistical Computing
+Platform: x86_64-pc-linux-gnu (64-bit)
+
+R is free software and comes with ABSOLUTELY NO WARRANTY.
+You are welcome to redistribute it under certain conditions.
+Type 'license()' or 'licence()' for distribution details.
+
+  Natural language support but running in an English locale
+
+R is a collaborative project with many contributors.
+Type 'contributors()' for more information and
+'citation()' on how to cite R or R packages in publications.
+
+Type 'demo()' for some demos, 'help()' for on-line help, or
+'help.start()' for an HTML browser interface to help.
+Type 'q()' to quit R.
+
+[Previously saved workspace restored]
+
+> rm(list = ls()) # clear global environment
+> graphics.off() # close all graphics
+> library(pacman) # needs to be installed first
+> # p_load is equivalent to combining both install.packages() and library()
+> p_load(knitr, dplyr, kableExtra, sampler, magrittr, caret, rpart, 
++ caretEnsemble,parallel,doParallel, recipes,  e1071)
+> 
+> setwd("~/finalProject/") # Set directory on OSC server
+> 
+> # Read in datasets
+> # The original paper specifically looks at week 1 internal data
+> # and week 3 external traffic data.
+> external3 <- read.csv("CIDDS-001-external-week3.csv") 
+> internal1 <- read.csv("CIDDS-001-internal-week1.csv") 
+> 
+> # Randomly select 172839 instances from week 1 traffic data
+> i1.sample <- rsamp(internal1, 172839)
+> 
+> # Drop unused columns and change data type of 'Bytes' from Factor to numeric
+> # "We have neglected AttackID and AttackDescription features because they just 
+> # give more information about executed attacks. Hence these attributes do not
+> # play any important role in classification"
+> # I also remove the Flows and Tos features because they were not included in
+> # the original paper.
+> external3 %<>% select(-Flows, -Tos, -attackID, -attackDescription) %>% 
++     mutate(Bytes = as.numeric(Bytes))
+> i1.sample %<>% select(-Flows, -Tos, -attackID, -attackDescription) %>% 
++     mutate(Bytes = as.numeric(Bytes))
+>                       
+> # Partition data into 66% training and 34% testing
+> e3.trainRowNums = createDataPartition(external3$class, p=0.66, list = F)
+> e3.trainData = external3[e3.trainRowNums,]
+> e3.testData = external3[-e3.trainRowNums,]
+> 
+> i1.trainRowNums = createDataPartition(i1.sample$class, p=0.66, list = F)
+> i1.trainData = i1.sample[i1.trainRowNums,]
+> i1.testData = i1.sample[-i1.trainRowNums,]
+> 
+> # Ensure the training and testing data have similar proportions in the 'class'
+> # attribute as the original data.
+> 
+> # 'class' proportions in external week 3 training data
+> prop.table(table(e3.trainData$class)) 
+
+  attacker     normal suspicious    unknown     victim 
+0.06048515 0.04038614 0.63943564 0.22111881 0.03857426 
+> # 'class' proportions in external week 3 testing data
+> prop.table(table(e3.testData$class))
+
+  attacker     normal suspicious    unknown     victim 
+0.06046977 0.04038365 0.63946873 0.22112021 0.03855764 
+> # 'class' proportions in external week 3 original data
+> prop.table(table(external3$class))
+
+  attacker     normal suspicious    unknown     victim 
+0.06047992 0.04038529 0.63944689 0.22111929 0.03856861 
+> 
+> # 'class' proportions in internal week 1 training data
+> prop.table(table(i1.trainData$class))
+
+  attacker     normal     victim 
+0.08782741 0.82962236 0.08255023 
+> # 'class' proportions in internal week 1 testing data
+> prop.table(table(i1.testData$class))
+
+  attacker     normal     victim 
+0.08781036 0.82965471 0.08253493 
+> # 'class' proportions in internal week 1 sampled data
+> prop.table(table(i1.sample$class))
+
+  attacker     normal     victim 
+0.08782161 0.82963336 0.08254503 
+> # 'class' proportions in internal week 1 original data
+> prop.table(table(internal1$class))
+
+  attacker     normal     victim 
+0.08829536 0.82954273 0.08216191 
+> 
+> # Preprocess data
+> e3.model_recipe <- recipe(class ~ ., data = e3.trainData)
+> e3.model_recipe_steps <- e3.model_recipe %>% 
++     step_other(
++     threshold = 0.1,
++     all_nominal(),
++     -all_outcomes())
+> prepped_recipe <- prep(e3.model_recipe_steps, training = e3.trainData)
+> e3.trainData.preProcessed <- bake(prepped_recipe, e3.trainData)
+> e3.testData.preProcessed <- bake(prepped_recipe, e3.testData)
+> 
+> i1.model_recipe <- recipe(class ~ ., data = i1.trainData)
+> i1.model_recipe_steps <- i1.model_recipe %>% 
++     step_other(
++     threshold = 0.1,
++     all_nominal(),
++     -all_outcomes())
+> 
+> # Separate the 'class' column from the testing data for both datasets
+> y.e3.test = e3.testData.preProcessed$class
+> y.i1.test = i1.testData$class
+> 
+> # Model building using 66% partitioned testing data
+> numCores = 16 # Using 16 cores
+> cl = makePSOCKcluster(numCores, outfile="niddModelLog.txt")
+> registerDoParallel(cl)
+> 
+> e3.trControl = trainControl(
++   method = "cv",
++   number = 10,
++   classProbs = T,
++   selectionFunction = "best",
++   index = createResample(e3.trainData.preProcessed$class, 10) )
+> 
+> i1.trControl = trainControl(
++   method = "cv",
++   number = 10,
++   classProbs = T,
++   selectionFunction = "best",
++   index = createResample(i1.trainData$class, 10) )
+> 
+> #"Statistical analysis of CIDDS-001 can be done using other ML algorithms in 
+> # order to analyse their performance on the dataset."  
+> # CART classification model for week 3 external server traffic data
+> e3.cartFit <- train(class ~ ., data=e3.trainData.preProcessed, method="rpart", 
++     trControl = e3.trControl, tuneLength = 10)
+> # CART classification model for week 1 openstack traffic data
+> i1.cart <- train(i1.model_recipe_steps, data = i1.trainData, method="rpart",
++     trControl = i1.trControl, tuneLength=10)
+> 
+> # Classify external week 3 traffic data using CART
+> e3.cartPredict <- predict(e3.cartFit, newdata = e3.testData.preProcessed)
+> confusionMatrix(e3.cartPredict, y.e3.test)
+Confusion Matrix and Statistics
+
+            Reference
+Prediction   attacker normal suspicious unknown victim
+  attacker       3146      0          0       0      0
+  normal            0   1906         23      38      0
+  suspicious        0     73      32811     805      2
+  unknown           0    122        435   10661      0
+  victim            0      0          0       0   2004
+
+Overall Statistics
+                                          
+               Accuracy : 0.9712          
+                 95% CI : (0.9697, 0.9726)
+    No Information Rate : 0.6395          
+    P-Value [Acc > NIR] : < 2.2e-16       
+                                          
+                  Kappa : 0.9458          
+                                          
+ Mcnemar's Test P-Value : NA              
+
+Statistics by Class:
+
+                     Class: attacker Class: normal Class: suspicious
+Sensitivity                  1.00000       0.90719            0.9862
+Specificity                  1.00000       0.99878            0.9531
+Pos Pred Value               1.00000       0.96899            0.9739
+Neg Pred Value               1.00000       0.99610            0.9750
+Prevalence                   0.06047       0.04038            0.6395
+Detection Rate               0.06047       0.03664            0.6307
+Detection Prevalence         0.06047       0.03781            0.6476
+Balanced Accuracy            1.00000       0.95298            0.9697
+                     Class: unknown Class: victim
+Sensitivity                  0.9267       0.99900
+Specificity                  0.9863       1.00000
+Pos Pred Value               0.9503       1.00000
+Neg Pred Value               0.9793       0.99996
+Prevalence                   0.2211       0.03856
+Detection Rate               0.2049       0.03852
+Detection Prevalence         0.2156       0.03852
+Balanced Accuracy            0.9565       0.99950
+> # We can be confident that the accuracy for the external week 3 traffic
+> # CART model is between 97.09% and 97.37%. It seems as though the 
+> # 'attacker' and 'victim' classes are identified with 100% accuracy.
+> 
+> # Classify week 1 openstack traffic data using CART
+> i1.cartPredict <- predict(i1.cart, newdata = i1.testData, type = "raw")
+> confusionMatrix(i1.cartPredict, y.i1.test)
+Confusion Matrix and Statistics
+
+          Reference
+Prediction attacker normal victim
+  attacker     5160      0      0
+  normal          0  48753      0
+  victim          0      0   4850
+
+Overall Statistics
+                                     
+               Accuracy : 1          
+                 95% CI : (0.9999, 1)
+    No Information Rate : 0.8297     
+    P-Value [Acc > NIR] : < 2.2e-16  
+                                     
+                  Kappa : 1          
+                                     
+ Mcnemar's Test P-Value : NA         
+
+Statistics by Class:
+
+                     Class: attacker Class: normal Class: victim
+Sensitivity                  1.00000        1.0000       1.00000
+Specificity                  1.00000        1.0000       1.00000
+Pos Pred Value               1.00000        1.0000       1.00000
+Neg Pred Value               1.00000        1.0000       1.00000
+Prevalence                   0.08781        0.8297       0.08253
+Detection Rate               0.08781        0.8297       0.08253
+Detection Prevalence         0.08781        0.8297       0.08253
+Balanced Accuracy            1.00000        1.0000       1.00000
+> # The CART model for the OpenStack traffic data accuracy is 100%, which as
+> # mentioned in the original paper "may be due to random sampling of instances
+> # from the dataset file which can lead to some biased instance selections."
+> 
+> stopCluster(cl)
+> 
+> proc.time()
+   user  system elapsed 
+283.533  23.113 557.456 
